@@ -20,8 +20,11 @@ import gc
 import traceback
 import math
 import asyncio
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def _parse_args():
+    logging.info("Parsing command line arguments")
     parser = argparse.ArgumentParser(
         description="Generate a video from a text prompt or image using Gradio")
 
@@ -262,6 +265,7 @@ if  args.compile: #args.fastest or
 # compile = "transformer"
 
 def download_models(transformer_filename, text_encoder_filename):
+    logging.info("Downloading models")
     def computeList(filename):
         pos = filename.rfind("/")
         filename = filename[pos+1:]
@@ -285,6 +289,7 @@ def download_models(transformer_filename, text_encoder_filename):
                     if not os.path.isfile(targetRoot + onefile ):          
                         hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = targetRoot)
 
+    logging.info("Models downloaded")
 
 offload.default_verboseLevel = verbose_level
 
@@ -1013,7 +1018,7 @@ def apply_lset(lset_name, loras_choices, loras_mult_choices):
     return loras_choices, loras_mult_choices
 
 def create_demo():
-    
+    logging.info("Creating Gradio demo")
     default_inference_steps = 30
     default_flow_shift = get_default_flow(transformer_filename_i2v if use_image2video else transformer_filename_t2v)
     
@@ -1367,7 +1372,7 @@ if __name__ == "__main__":
         else:
             url = "http://" + server_name 
         webbrowser.open(url + ":" + str(server_port), new = 0, autoraise = True)
-
+    logging.info("Launching Gradio server")
     demo.launch(server_name=server_name, server_port=server_port, share=args.share)
 
  

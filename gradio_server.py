@@ -1373,6 +1373,6 @@ if __name__ == "__main__":
             url = "http://" + server_name 
         webbrowser.open(url + ":" + str(server_port), new = 0, autoraise = True)
     logging.info("Launching Gradio server")
-    demo.launch(server_name='"0.0.0.0"', server_port=server_port, share=args.share)
+    demo.launch(server_name='0.0.0.0', server_port=server_port, share=args.share)
 
  

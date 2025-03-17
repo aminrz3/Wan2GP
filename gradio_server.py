@@ -71,7 +71,7 @@ def _parse_args():
     parser.add_argument(
         "--lora-dir",
         type=str,
-        default="loras", 
+        default="", 
         help="Path to a directory that contains Loras"
     )
 
@@ -83,12 +83,12 @@ def _parse_args():
         help="Lora preset to preload"
     )
 
-    parser.add_argument(
-        "--lora-preset-i2v",
-        type=str,
-        default="",
-        help="Lora preset to preload for i2v"
-    )
+    # parser.add_argument(
+    #     "--lora-preset-i2v",
+    #     type=str,
+    #     default="",
+    #     help="Lora preset to preload for i2v"
+    # )
 
     parser.add_argument(
         "--profile",
@@ -173,6 +173,18 @@ def _parse_args():
 
     return args
 
+def get_lora_dir(root_lora_dir):
+    if not use_image2video:
+        if  "1.3B" in transformer_filename_t2v:
+            lora_dir_1_3B = os.path.join(root_lora_dir, "1.3B")
+            if os.path.isdir(lora_dir_1_3B ):
+                return lora_dir_1_3B
+        else:
+            lora_dir_14B = os.path.join(root_lora_dir, "14B")
+            if os.path.isdir(lora_dir_14B ):
+                return lora_dir_14B
+    return root_lora_dir    
+
 attention_modes_supported = get_attention_modes()
 
 args = _parse_args()
@@ -201,6 +213,7 @@ if not Path(server_config_filename).is_file():
                      "text_encoder_filename" : text_encoder_choices[1],
                      "compile" : "",
                      "default_ui": "t2v",
+                     "boost" : 1,
                      "vae_config": 0,
                      "profile" : profile_type.LowRAM_LowVRAM }
 
@@ -226,6 +239,7 @@ if len(args.attention)> 0:
 
 profile =  force_profile_no if force_profile_no >=0 else server_config["profile"]
 compile = server_config.get("compile", "")
+boost = server_config.get("boost", 1)
 vae_config = server_config.get("vae_config", 0)
 if len(args.vae_config) > 0:
     vae_config = int(args.vae_config)
@@ -237,13 +251,13 @@ if args.t2v:
 if args.i2v:
     use_image2video = True
 
-if use_image2video:
-    lora_dir =args.lora_dir_i2v
-    lora_preselected_preset = args.lora_preset_i2v
-else:
-    lora_dir =args.lora_dir
-    lora_preselected_preset = args.lora_preset
-
+lora_dir =args.lora_dir
+if use_image2video and len(lora_dir)==0:
+    root_lora_dir =args.lora_dir_i2v
+if len(lora_dir) ==0:
+    root_lora_dir = "loras_i2v" if use_image2video else "loras"
+lora_dir = get_lora_dir(root_lora_dir)
+lora_preselected_preset = args.lora_preset
 default_tea_cache = 0
 # if args.fast : #or args.fastest
 #     transformer_filename_t2v = transformer_choices_t2v[2]
@@ -295,45 +309,62 @@ offload.default_verboseLevel = verbose_level
 
 download_models(transformer_filename_i2v if use_image2video else transformer_filename_t2v, text_encoder_filename) 
 
-def sanitize_file_name(file_name):
-    return file_name.replace("/","").replace("\\","").replace(":","").replace("|","").replace("?","").replace("<","").replace(">","").replace("\"","") 
+def sanitize_file_name(file_name, rep =""):
+    return file_name.replace("/",rep).replace("\\",rep).replace(":",rep).replace("|",rep).replace("?",rep).replace("<",rep).replace(">",rep).replace("\"",rep) 
 
 def extract_preset(lset_name, loras):
+    loras_choices = []
+    loras_choices_files = []
+    loras_mult_choices = ""
+    prompt =""
+    full_prompt =""
     lset_name = sanitize_file_name(lset_name)
     if not lset_name.endswith(".lset"):
         lset_name_filename = os.path.join(lora_dir, lset_name + ".lset" ) 
     else:
         lset_name_filename = os.path.join(lora_dir, lset_name ) 
-
+    error = ""
     if not os.path.isfile(lset_name_filename):
-        raise gr.Error(f"Preset '{lset_name}' not found ")
+        error = f"Preset '{lset_name}' not found "
+    else:
+        missing_loras = []
 
-    with open(lset_name_filename, "r", encoding="utf-8") as reader:
-        text = reader.read()
-    lset = json.loads(text)
+        with open(lset_name_filename, "r", encoding="utf-8") as reader:
+            text = reader.read()
+        lset = json.loads(text)
 
-    loras_choices_files = lset["loras"]
-    loras_choices = []
-    missing_loras = []
-    for lora_file in loras_choices_files:
-        loras_choice_no = loras.index(os.path.join(lora_dir, lora_file))
-        if loras_choice_no < 0:
-            missing_loras.append(lora_file)
-        else:
-            loras_choices.append(str(loras_choice_no))
+        loras_choices_files = lset["loras"]
+        for lora_file in loras_choices_files:
+            choice = os.path.join(lora_dir, lora_file)
+            if choice not in loras:
+                missing_loras.append(lora_file)
+            else:
+                loras_choice_no = loras.index(choice)
+                loras_choices.append(str(loras_choice_no))
 
-    if len(missing_loras) > 0:
-        raise gr.Error(f"Unable to apply Lora preset '{lset_name} because the following Loras files are missing: {missing_loras}")
+        if len(missing_loras) > 0:
+            error = f"Unable to apply Lora preset '{lset_name} because the following Loras files are missing or invalid: {missing_loras}"
+        
+        loras_mult_choices = lset["loras_mult"]
+        prompt = lset.get("prompt", "")
+        full_prompt = lset.get("full_prompt", False)
+    return loras_choices, loras_mult_choices, prompt, full_prompt, error
+
+def  get_default_prompt(i2v):
+    if i2v:
+        return "Several giant wooly mammoths approach treading through a snowy meadow, their long wooly fur lightly blows in the wind as they walk, snow covered trees and dramatic snow capped mountains in the distance, mid afternoon light with wispy clouds and a sun high in the distance creates a warm glow, the low camera view is stunning capturing the large furry mammal with beautiful photography, depth of field."
+    else:
+        return "A large orange octopus is seen resting on the bottom of the ocean floor, blending in with the sandy and rocky terrain. Its tentacles are spread out around its body, and its eyes are closed. The octopus is unaware of a king crab that is crawling towards it from behind a rock, its claws raised and ready to attack. The crab is brown and spiny, with long legs and antennae. The scene is captured from a wide angle, showing the vastness and depth of the ocean. The water is clear and blue, with rays of sunlight filtering through. The shot is sharp and crisp, with a high dynamic range. The octopus and the crab are in focus, while the background is slightly blurred, creating a depth of field effect."
+
     
-    loras_mult_choices = lset["loras_mult"]
-    return loras_choices, loras_mult_choices
-
-def setup_loras(pipe,  lora_dir, lora_preselected_preset, split_linear_modules_map = None):
+def setup_loras(transformer,  lora_dir, lora_preselected_preset, split_linear_modules_map = None):
     loras =[]
     loras_names = []
     default_loras_choices = []
     default_loras_multis_str = ""
     loras_presets = []
+    default_lora_preset = ""
+    default_prompt = ""
 
     from pathlib import Path
 
@@ -341,7 +372,6 @@ def setup_loras(pipe,  lora_dir, lora_preselected_preset, split_linear_modules_m
         if not os.path.isdir(lora_dir):
             raise Exception("--lora-dir should be a path to a directory that contains Loras")
 
-    default_lora_preset = ""
 
     if lora_dir != None:
         import glob
@@ -353,17 +383,21 @@ def setup_loras(pipe,  lora_dir, lora_preselected_preset, split_linear_modules_m
         dir_presets.sort()
         loras_presets = [ Path(Path(file_path).parts[-1]).stem for file_path in dir_presets]
 
+    loras = offload.load_loras_into_model(transformer, loras,  activate_all_loras=False, check_only= True, split_linear_modules_map = split_linear_modules_map) #lora_multiplier,
+
     if len(loras) > 0:
         loras_names = [ Path(lora).stem for lora in loras  ]
-        offload.load_loras_into_model(pipe["transformer"], loras,  activate_all_loras=False, split_linear_modules_map = split_linear_modules_map) #lora_multiplier,
 
     if len(lora_preselected_preset) > 0:
         if not os.path.isfile(os.path.join(lora_dir, lora_preselected_preset + ".lset")):
             raise Exception(f"Unknown preset '{lora_preselected_preset}'")
         default_lora_preset = lora_preselected_preset
-        default_loras_choices, default_loras_multis_str= extract_preset(default_lora_preset, loras)
-
-    return loras, loras_names, default_loras_choices, default_loras_multis_str, default_lora_preset, loras_presets
+        default_loras_choices, default_loras_multis_str, default_prompt, _ , error = extract_preset(default_lora_preset, loras)
+        if len(error) > 0:
+            print(error[:200])
+    if len(default_prompt) == 0:
+        default_prompt = get_default_prompt(use_image2video)
+    return loras, loras_names, default_loras_choices, default_loras_multis_str, default_prompt, default_lora_preset, loras_presets
 
 
 def load_t2v_model(model_filename, value):
@@ -444,13 +478,13 @@ def load_models(i2v,  lora_dir,  lora_preselected_preset ):
         kwargs["budgets"] = { "*" : "70%" }
 
 
-    loras, loras_names, default_loras_choices, default_loras_multis_str, default_lora_preset, loras_presets = setup_loras(pipe,  lora_dir, lora_preselected_preset, None)
-    offloadobj = offload.profile(pipe, profile_no= profile, compile = compile, quantizeTransformer = quantizeTransformer, **kwargs)  
+    offloadobj = offload.profile(pipe, profile_no= profile, compile = compile, quantizeTransformer = quantizeTransformer, loras = "transformer", **kwargs)  
+    loras, loras_names, default_loras_choices, default_loras_multis_str, default_prompt, default_lora_preset, loras_presets = setup_loras(pipe["transformer"],  lora_dir, lora_preselected_preset, None)
 
 
-    return wan_model, offloadobj, loras, loras_names, default_loras_choices, default_loras_multis_str, default_lora_preset, loras_presets
+    return wan_model, offloadobj, loras, loras_names, default_loras_choices, default_loras_multis_str, default_prompt, default_lora_preset, loras_presets
 
-wan_model, offloadobj,  loras, loras_names, default_loras_choices, default_loras_multis_str, default_lora_preset, loras_presets = load_models(use_image2video, lora_dir, lora_preselected_preset )
+wan_model, offloadobj,  loras, loras_names, default_loras_choices, default_loras_multis_str, default_prompt, default_lora_preset, loras_presets = load_models(use_image2video, lora_dir, lora_preselected_preset )
 gen_in_progress = False
 
 def get_auto_attention():
@@ -492,13 +526,14 @@ def apply_changes(  state,
                     profile_choice,
                     vae_config_choice,
                     default_ui_choice ="t2v",
+                    boost_choice = 1
 ):
     if args.lock_config:
         return
     if gen_in_progress:
         yield "<DIV ALIGN=CENTER>Unable to change config when a generation is in progress</DIV>"
         return
-    global offloadobj, wan_model, loras, loras_names, default_loras_choices, default_loras_multis_str, default_lora_preset, loras_presets
+    global offloadobj, wan_model, loras, loras_names, default_loras_choices, default_loras_multis_str, default_prompt, default_lora_preset, loras_presets
     server_config = {"attention_mode" : attention_choice,  
                      "transformer_filename": transformer_choices_t2v[transformer_t2v_choice], 
                      "transformer_filename_i2v": transformer_choices_i2v[transformer_i2v_choice],  ##########
@@ -507,6 +542,7 @@ def apply_changes(  state,
                      "profile" : profile_choice,
                      "vae_config" : vae_config_choice,
                      "default_ui" : default_ui_choice,
+                     "boost" : boost_choice,
                        }
 
     if Path(server_config_filename).is_file():
@@ -534,7 +570,7 @@ def apply_changes(  state,
     state["config_new"] = server_config
     state["config_old"] = old_server_config
 
-    global attention_mode, profile, compile, transformer_filename_t2v, transformer_filename_i2v, text_encoder_filename, vae_config
+    global attention_mode, profile, compile, transformer_filename_t2v, transformer_filename_i2v, text_encoder_filename, vae_config, boost, lora_dir
     attention_mode = server_config["attention_mode"]
     profile = server_config["profile"]
     compile = server_config["compile"]
@@ -542,8 +578,8 @@ def apply_changes(  state,
     transformer_filename_i2v = server_config["transformer_filename_i2v"]
     text_encoder_filename = server_config["text_encoder_filename"]
     vae_config = server_config["vae_config"]
-
-    if  all(change in ["attention_mode", "vae_config", "default_ui"] for change in changes ):
+    boost = server_config["boost"]
+    if  all(change in ["attention_mode", "vae_config", "default_ui", "boost"] for change in changes ):
         if "attention_mode" in changes:
             pass
 
@@ -552,8 +588,8 @@ def apply_changes(  state,
         offloadobj.release()
         offloadobj = None
         yield "<DIV ALIGN=CENTER>Please wait while the new configuration is being applied</DIV>"
-
-        wan_model, offloadobj,  loras, loras_names, default_loras_choices, default_loras_multis_str, default_lora_preset, loras_presets = load_models(use_image2video, lora_dir,  lora_preselected_preset )
+        lora_dir = get_lora_dir(root_lora_dir)
+        wan_model, offloadobj,  loras, loras_names, default_loras_choices, default_loras_multis_str, default_prompt, default_lora_preset, loras_presets = load_models(use_image2video, lora_dir,  lora_preselected_preset )
 
 
     yield "<DIV ALIGN=CENTER>The new configuration has been succesfully applied</DIV>"
@@ -582,7 +618,11 @@ def update_defaults(state, num_inference_steps,flow_shift):
             num_inference_steps, flow_shift = get_default_flow(trans_file)
 
     header = generate_header(trans_file, server_config["compile"], server_config["attention_mode"] )
-    return num_inference_steps, flow_shift, header 
+    new_loras_choices = [ (loras_name, str(i)) for i,loras_name in enumerate(loras_names)]
+    lset_choices = [ (preset, preset) for preset in loras_presets]
+    lset_choices.append( (new_preset_msg, ""))
+
+    return num_inference_steps, flow_shift, header,  gr.Dropdown(choices=lset_choices, value= ""), gr.Dropdown(choices=new_loras_choices, value= [])  
 
 
 from moviepy.editor import ImageSequenceClip
@@ -595,23 +635,32 @@ def save_video(final_frames, output_path, fps=24):
     ImageSequenceClip(list(final_frames), fps=fps).write_videofile(output_path, verbose= False, logger = None)
 
 def build_callback(state, pipe, progress, status, num_inference_steps):
-    def callback(step_idx, latents):
-        step_idx += 1         
-        if state.get("abort", False):
-            # pipe._interrupt = True
-            status_msg = status + " - Aborting"    
-        elif step_idx  == num_inference_steps:
-            status_msg = status + " - VAE Decoding"    
+    def callback(step_idx, latents, read_state = False):
+        status = state["progress_status"] 
+        if read_state:
+            phase, step_idx  = state["progress_phase"] 
         else:
-            status_msg = status + " - Denoising"   
-
-        progress( (step_idx , num_inference_steps) , status_msg  ,  num_inference_steps)
+            step_idx += 1         
+            if state.get("abort", False):
+                # pipe._interrupt = True
+                phase = " - Aborting"    
+            elif step_idx  == num_inference_steps:
+                phase = " - VAE Decoding"    
+            else:
+                phase = " - Denoising"   
+            state["progress_phase"] = (phase, step_idx)
+        status_msg = status + phase      
+        if step_idx >= 0:
+            progress( (step_idx , num_inference_steps) , status_msg  ,  num_inference_steps)
+        else:
+            progress(0, status_msg)
             
     return callback
 
 def abort_generation(state):
     if "in_progress" in state:
         state["abort"] = True
+        state["extra_orders"] = 0
         wan_model._interrupt= True
         return gr.Button(interactive=  False)
     else:
@@ -626,11 +675,12 @@ def finalize_gallery(state):
     if "in_progress" in state:
         del state["in_progress"]
         choice = state.get("selected",0)
-    
+
+    state["extra_orders"] = 0
     time.sleep(0.2)
     global gen_in_progress
     gen_in_progress = False
-    return gr.Gallery(selected_index=choice), gr.Button(interactive=  True)
+    return gr.Gallery(selected_index=choice), gr.Button(interactive=  True), gr.Button(visible= True), gr.Checkbox(visible= False)
 
 def select_video(state , event_data: gr.EventData):
     data=  event_data._data
@@ -647,6 +697,32 @@ def expand_slist(slist, num_inference_steps ):
         pos += inc
     return new_slist
 
+
+def one_more_video(state):
+    extra_orders = state.get("extra_orders", 0)
+    extra_orders += 1
+    state["extra_orders"]  = extra_orders
+    prompts_max = state["prompts_max"]
+    prompt_no = state["prompt_no"] 
+    video_no = state["video_no"] 
+    total_video = state["total_video"] 
+    # total_video += (prompts_max- prompt_no) 
+    total_video += 1
+    total_generation = state["total_generation"] + extra_orders
+    state["total_video"] = total_video
+
+    state["progress_status"] = f"Video {video_no}/{total_video}"
+    offload.shared_state["refresh"] = 1
+    # if (prompts_max - prompt_no) > 1:
+    #     gr.Info(f"An extra video generation is planned for a total of {total_generation} videos for the next {prompts_max - prompt_no} prompts")
+    # else:
+    gr.Info(f"An extra video generation is planned for a total of {total_generation} videos for this prompt")
+
+    return state 
+
+def prepare_generate_video():
+    
+    return gr.Button(visible= False), gr.Checkbox(visible= True)
 
 def generate_video(
     prompt,
@@ -667,6 +743,10 @@ def generate_video(
     video_to_continue,
     max_frames,
     RIFLEx_setting,
+    slg_switch,
+    slg_layers,    
+    slg_start,
+    slg_end, 
     state,
     progress=gr.Progress() #track_tqdm= True
 
@@ -689,7 +769,8 @@ def generate_video(
     width, height = resolution.split("x")
     width, height = int(width), int(height)
 
-
+    if slg_switch == 0:
+        slg_layers = None
     if use_image2video:
         if "480p" in  transformer_filename_i2v and width * height > 848*480:
             raise gr.Error("You must use the 720P image to video model to generate videos with a resolution equivalent to 720P")
@@ -725,6 +806,7 @@ def generate_video(
     else: 
         VAE_tile_size = 128  
 
+    trans = wan_model.model
 
     global gen_in_progress
     gen_in_progress = True
@@ -732,7 +814,9 @@ def generate_video(
     if len(prompt) ==0:
         return
     prompts = prompt.replace("\r", "").split("\n")
-
+    prompts = [prompt.strip() for prompt in prompts if len(prompt.strip())>0 and not prompt.startswith("#")]
+    if len(prompts) ==0:
+        return
     if use_image2video:
         if image_to_continue is not None:
             if isinstance(image_to_continue, list):
@@ -777,6 +861,9 @@ def generate_video(
                 return False
         list_mult_choices_nums = []
         if len(loras_mult_choices) > 0:
+            loras_mult_choices_list = loras_mult_choices.replace("\r", "").split("\n")
+            loras_mult_choices_list = [multi for multi in loras_mult_choices_list if len(multi)>0 and not multi.startswith("#")]
+            loras_mult_choices = " ".join(loras_mult_choices_list)
             list_mult_choices_str = loras_mult_choices.split(" ")
             for i, mult in enumerate(list_mult_choices_str):
                 mult = mult.strip()
@@ -795,9 +882,13 @@ def generate_video(
                     list_mult_choices_nums.append(float(mult))
         if len(list_mult_choices_nums ) < len(loras_choices):
             list_mult_choices_nums  += [1.0] * ( len(loras_choices) - len(list_mult_choices_nums ) )
-
-        offload.activate_loras(wan_model.model, loras_choices, list_mult_choices_nums)
-
+        loras_selected = [ lora for i, lora in enumerate(loras) if str(i) in loras_choices]
+        pinnedLora = False # profile !=5
+        offload.load_loras_into_model(trans, loras_selected, list_mult_choices_nums, activate_all_loras=True, pinnedLora=pinnedLora, split_linear_modules_map = None) 
+        errors = trans._loras_errors
+        if len(errors) > 0:
+            error_files = [msg for _ ,  msg  in errors]
+            raise gr.Error("Error while loading Loras: " + ", ".join(error_files))
     seed = None if seed == -1 else seed
     # negative_prompt = "" # not applicable in the inference
 
@@ -810,45 +901,75 @@ def generate_video(
     # VAE Tiling
     device_mem_capacity = torch.cuda.get_device_properties(0).total_memory / 1048576
 
-
+    joint_pass = boost ==1
    # TeaCache   
-    trans = wan_model.model
     trans.enable_teacache = tea_cache > 0
- 
+    if trans.enable_teacache:
+        if use_image2video:
+            if '480p' in transformer_filename_i2v: 
+                # teacache_thresholds = [0.13, .19, 0.26]
+                trans.coefficients = [-3.02331670e+02,  2.23948934e+02, -5.25463970e+01,  5.87348440e+00, -2.01973289e-01]
+            elif '720p' in transformer_filename_i2v:
+                teacache_thresholds = [0.18, 0.2 , 0.3]
+                trans.coefficients = [-114.36346466,   65.26524496,  -18.82220707,    4.91518089,   -0.23412683]
+            else:
+                raise gr.Error("Teacache not supported for this model")
+        else:
+            if '1.3B' in transformer_filename_t2v:
+                # teacache_thresholds= [0.05, 0.07, 0.08]
+                trans.coefficients = [2.39676752e+03, -1.31110545e+03,  2.01331979e+02, -8.29855975e+00, 1.37887774e-01]
+            elif '14B' in transformer_filename_t2v:
+                # teacache_thresholds = [0.14, 0.15, 0.2]
+                trans.coefficients = [-5784.54975374,  5449.50911966, -1811.16591783,   256.27178429, -13.02252404]
+            else:
+                    raise gr.Error("Teacache not supported for this model")
+
     import random
     if seed == None or seed <0:
         seed = random.randint(0, 999999999)
 
     file_list = []
     state["file_list"] = file_list    
-    from einops import rearrange
     save_path = os.path.join(os.getcwd(), "gradio_outputs")
     os.makedirs(save_path, exist_ok=True)
     video_no = 0
     total_video =  repeat_generation * len(prompts)
+    state["total_video"] = total_video
+    extra_generation = 0
     abort = False
     start_time = time.time()
-    for prompt in prompts:
-        for _ in range(repeat_generation):
-            if abort:
+    state["prompts_max"] = len(prompts)
+    for no, prompt in enumerate(prompts):
+        repeat_no = 0
+        state["prompt_no"] = no
+        extra_generation = 0
+        while True: 
+            extra_orders = state.get("extra_orders",0)
+            state["extra_orders"] = 0
+            extra_generation += extra_orders
+            state["total_generation"] = repeat_generation + extra_generation
+            # total_video += (len(prompts)- no) * extra_orders
+            total_video += extra_orders
+            if abort or repeat_no >= (repeat_generation + extra_generation):
                 break
 
             if trans.enable_teacache:
                 trans.teacache_counter = 0
-                trans.rel_l1_thresh = tea_cache
-                trans.teacache_start_step =  max(math.ceil(tea_cache_start_step_perc*num_inference_steps/100),2)
+                trans.teacache_multiplier = tea_cache
+                trans.teacache_start_step =  int(tea_cache_start_step_perc*num_inference_steps/100)
+                trans.num_steps = num_inference_steps                
+                trans.teacache_skipped_steps = 0
                 trans.previous_residual_uncond = None
-                trans.previous_modulated_input_uncond = None                
                 trans.previous_residual_cond = None
-                trans.previous_modulated_input_cond= None                
-
-                trans.teacache_cache_device = "cuda" if profile==3 or profile==1 else "cpu"                                 
 
             video_no += 1
             status = f"Video {video_no}/{total_video}"
+            state["video_no"] = video_no
+            state["progress_status"] = status 
+            state["progress_phase"] = (" - Encoding Prompt", -1 )
             progress(0, desc=status + " - Encoding Prompt" )   
-            
             callback = build_callback(state, trans, progress, status, num_inference_steps)
+            offload.shared_state["callback"] = callback 
 
 
             gc.collect()
@@ -858,7 +979,7 @@ def generate_video(
                 if use_image2video:
                     samples = wan_model.generate(
                         prompt,
-                        image_to_continue[ (video_no-1) % len(image_to_continue)],  
+                        image_to_continue[no].convert('RGB'),  
                         frame_num=(video_length // 4)* 4 + 1,
                         max_area=MAX_AREA_CONFIGS[resolution], 
                         shift=flow_shift,
@@ -869,7 +990,11 @@ def generate_video(
                         offload_model=False,
                         callback=callback,
                         enable_RIFLEx = enable_RIFLEx,
-                        VAE_tile_size = VAE_tile_size
+                        VAE_tile_size = VAE_tile_size,
+                        joint_pass = joint_pass,
+                        slg_layers = slg_layers,
+                        slg_start = slg_start/100,
+                        slg_end = slg_end/100,
                     )
 
                 else:
@@ -885,13 +1010,18 @@ def generate_video(
                         offload_model=False,
                         callback=callback,
                         enable_RIFLEx = enable_RIFLEx,
-                        VAE_tile_size = VAE_tile_size
+                        VAE_tile_size = VAE_tile_size,
+                        joint_pass = joint_pass,
+                        slg_layers = slg_layers,
+                        slg_start = slg_start/100,
+                        slg_end = slg_end/100,
                     )
             except Exception as e:
                 gen_in_progress = False
                 if temp_filename!= None and  os.path.isfile(temp_filename):
                     os.remove(temp_filename)
                 offload.last_offload_obj.unload_all()
+                offload.unload_loras_from_model(trans)
                 # if compile:
                 #     cache_size = torch._dynamo.config.cache_size_limit                                      
                 #     torch.compiler.reset()
@@ -916,6 +1046,7 @@ def generate_video(
                     raise gr.Error(f"The generation of the video has encountered an error, please check your terminal for more information. '{s}'")
 
             if trans.enable_teacache:
+                print(f"Teacache Skipped Steps:{trans.teacache_skipped_steps}/{num_inference_steps}" )
                 trans.previous_residual_uncond = None
                 trans.previous_residual_cond = None
 
@@ -935,9 +1066,9 @@ def generate_video(
 
                 time_flag = datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d-%Hh%Mm%Ss")
                 if os.name == 'nt':
-                    file_name = f"{time_flag}_seed{seed}_{prompt[:50].replace('/','').strip()}.mp4".replace(':',' ').replace('\\',' ')
+                    file_name = f"{time_flag}_seed{seed}_{sanitize_file_name(prompt[:50]).strip()}.mp4"
                 else:
-                    file_name = f"{time_flag}_seed{seed}_{prompt[:100].replace('/','').strip()}.mp4".replace(':',' ').replace('\\',' ')
+                    file_name = f"{time_flag}_seed{seed}_{sanitize_file_name(prompt[:100]).strip()}.mp4"
                 video_path = os.path.join(os.getcwd(), "gradio_outputs", file_name)        
                 cache_video(
                     tensor=sample[None],
@@ -955,14 +1086,35 @@ def generate_video(
                     end_time = time.time()
                     yield f"Total Generation Time: {end_time-start_time:.1f}s"
             seed += 1
+            repeat_no += 1
   
     if temp_filename!= None and  os.path.isfile(temp_filename):
         os.remove(temp_filename)
     gen_in_progress = False
+    offload.unload_loras_from_model(trans)
+
 
 new_preset_msg = "Enter a Name for a Lora Preset or Choose One Above"
 
-def save_lset(lset_name, loras_choices, loras_mult_choices):
+
+def validate_delete_lset(lset_name):
+    if len(lset_name) == 0 or lset_name == new_preset_msg:
+        gr.Info(f"Choose a Preset to delete")
+        return  gr.Button(visible= True), gr.Checkbox(visible= True), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= False), gr.Button(visible= False) 
+    else:
+        return  gr.Button(visible= False), gr.Checkbox(visible= False), gr.Button(visible= False), gr.Button(visible= False), gr.Button(visible= True), gr.Button(visible= True) 
+    
+def validate_save_lset(lset_name):
+    if len(lset_name) == 0 or lset_name == new_preset_msg:
+        gr.Info("Please enter a name for the preset")
+        return  gr.Button(visible= True), gr.Checkbox(visible= True), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= False), gr.Button(visible= False),gr.Checkbox(visible= False) 
+    else:
+        return  gr.Button(visible= False), gr.Button(visible= False), gr.Button(visible= False), gr.Button(visible= False), gr.Button(visible= True), gr.Button(visible= True),gr.Checkbox(visible= True)
+
+def cancel_lset():
+    return gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= False), gr.Button(visible= False), gr.Button(visible= False), gr.Checkbox(visible= False)
+
+def save_lset(lset_name, loras_choices, loras_mult_choices, prompt, save_lset_prompt_cbox):
     global loras_presets
     
     if len(lset_name) == 0 or lset_name== new_preset_msg:
@@ -973,6 +1125,16 @@ def save_lset(lset_name, loras_choices, loras_mult_choices):
 
         loras_choices_files = [ Path(loras[int(choice_no)]).parts[-1] for choice_no in loras_choices  ]
         lset  = {"loras" : loras_choices_files, "loras_mult" : loras_mult_choices}
+        if save_lset_prompt_cbox!=1:
+            prompts = prompt.replace("\r", "").split("\n")
+            prompts = [prompt for prompt in prompts if len(prompt)> 0 and prompt.startswith("#")]
+            prompt = "\n".join(prompts)
+
+        if len(prompt) > 0:
+            lset["prompt"] = prompt
+        lset["full_prompt"] = save_lset_prompt_cbox ==1
+        
+
         lset_name_filename = lset_name + ".lset" 
         full_lset_name_filename = os.path.join(lora_dir, lset_name_filename) 
 
@@ -987,7 +1149,7 @@ def save_lset(lset_name, loras_choices, loras_mult_choices):
         lset_choices = [ ( preset, preset) for preset in loras_presets ]
         lset_choices.append( (new_preset_msg, ""))
 
-    return gr.Dropdown(choices=lset_choices, value= lset_name)
+    return gr.Dropdown(choices=lset_choices, value= lset_name), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= False), gr.Button(visible= False), gr.Checkbox(visible= False)
 
 def delete_lset(lset_name):
     global loras_presets
@@ -1005,42 +1167,84 @@ def delete_lset(lset_name):
 
     lset_choices = [ (preset, preset) for preset in loras_presets]
     lset_choices.append((new_preset_msg, ""))
-    return  gr.Dropdown(choices=lset_choices, value= lset_choices[pos][1])
+    return  gr.Dropdown(choices=lset_choices, value= lset_choices[pos][1]), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= False), gr.Checkbox(visible= False)
 
-def apply_lset(lset_name, loras_choices, loras_mult_choices):
+def refresh_lora_list(lset_name, loras_choices):
+    global loras,loras_names, loras_presets
+    prev_lora_names_selected = [ loras_names[int(i)] for i in loras_choices]
+
+    loras, loras_names, _, _, _, _, loras_presets = setup_loras(wan_model.model,  lora_dir, lora_preselected_preset, None)
+    gc.collect()
+    new_loras_choices = [ (loras_name, str(i)) for i,loras_name in enumerate(loras_names)]
+    new_loras_dict = { loras_name: str(i) for i,loras_name in enumerate(loras_names) }
+    lora_names_selected = []
+    for lora in prev_lora_names_selected:
+        lora_id = new_loras_dict.get(lora, None)
+        if lora_id!= None:
+            lora_names_selected.append(lora_id)
+
+    lset_choices = [ (preset, preset) for preset in loras_presets]
+    lset_choices.append((new_preset_msg, ""))
+    if lset_name in loras_presets:
+        pos = loras_presets.index(lset_name) 
+    else:
+        pos = len(loras_presets)
+        lset_name =""
+    
+    errors = wan_model.model._loras_errors
+    if len(errors) > 0:
+        error_files = [path for path, _ in errors]
+        gr.Info("Error while refreshing Lora List, invalid Lora files: " + ", ".join(error_files))
+    else:
+        gr.Info("Lora List has been refreshed")
+
+
+    return gr.Dropdown(choices=lset_choices, value= lset_choices[pos][1]), gr.Dropdown(choices=new_loras_choices, value= lora_names_selected) 
+
+def apply_lset(lset_name, loras_choices, loras_mult_choices, prompt):
 
     if len(lset_name) == 0 or lset_name== new_preset_msg:
         gr.Info("Please choose a preset in the list or create one")
     else:
-        loras_choices, loras_mult_choices= extract_preset(lset_name, loras)
-        gr.Info(f"Lora Preset '{lset_name}' has been applied")
+        loras_choices, loras_mult_choices, preset_prompt, full_prompt, error = extract_preset(lset_name, loras)
+        if len(error) > 0:
+            gr.Info(error)
+        else:
+            if full_prompt:
+                prompt = preset_prompt
+            elif len(preset_prompt) > 0:
+                prompts = prompt.replace("\r", "").split("\n")
+                prompts = [prompt for prompt in prompts if len(prompt)>0 and not prompt.startswith("#")]
+                prompt = "\n".join(prompts) 
+                prompt = preset_prompt + '\n' + prompt
+            gr.Info(f"Lora Preset '{lset_name}' has been applied")
 
-    return loras_choices, loras_mult_choices
+    return loras_choices, loras_mult_choices, prompt
 
 def create_demo():
     logging.info("Creating Gradio demo")
     default_inference_steps = 30
+
     default_flow_shift = get_default_flow(transformer_filename_i2v if use_image2video else transformer_filename_t2v)
-    
     with gr.Blocks() as demo:
         state = gr.State({})
        
         if use_image2video:
-            gr.Markdown("<div align=center><H1>Wan 2.1<SUP>GP</SUP> v1 - AI Image To Video Generator (<A HREF='https://github.com/deepbeepmeep/Wan2GP'>Updates</A> / <A HREF='https://github.com/Wan-Video/Wan2.1'>Original by Alibaba</A>)</H1></div>")
+            gr.Markdown("<div align=center><H1>Wan 2.1<SUP>GP</SUP> v1.7 - AI Image To Video Generator (<A HREF='https://github.com/deepbeepmeep/Wan2GP'>Updates</A> / <A HREF='https://github.com/Wan-Video/Wan2.1'>Original by Alibaba</A>)</H1></div>")
         else:
-            gr.Markdown("<div align=center><H1>Wan 2.1<SUP>GP</SUP> v1 - AI Text To Video Generator (<A HREF='https://github.com/deepbeepmeep/Wan2GP'>Updates</A> / <A HREF='https://github.com/Wan-Video/Wan2.1'>Original by Alibaba</A>)</H1></div>")
+            gr.Markdown("<div align=center><H1>Wan 2.1<SUP>GP</SUP> v1.7 - AI Text To Video Generator (<A HREF='https://github.com/deepbeepmeep/Wan2GP'>Updates</A> / <A HREF='https://github.com/Wan-Video/Wan2.1'>Original by Alibaba</A>)</H1></div>")
 
-        gr.Markdown("<FONT SIZE=3>With this first release of Wan 2.1GP by <B>DeepBeepMeep</B>, the VRAM requirements have been divided by more than 2 with no quality loss</FONT>")
+        gr.Markdown("<FONT SIZE=3>Welcome to Wan 2.1GP by <B>DeepBeepMeep</B>, a super fast and low VRAM Video Generator !</FONT>")
 
         if use_image2video  and False:
             pass
         else:
-            gr.Markdown("The VRAM requirements will depend greatly of the resolution and the duration of the video, for instance : 24 GB of VRAM (RTX 3090 / RTX 4090), the limits are as follows:")
+            gr.Markdown("The VRAM requirements will depend greatly of the resolution and the duration of the video, for instance :")
             gr.Markdown("- 848 x 480 with a 14B model: 80 frames (5s) : 8 GB of VRAM")
             gr.Markdown("- 848 x 480 with the 1.3B model: 80 frames (5s) : 5 GB of VRAM")
             gr.Markdown("- 1280 x 720 with a 14B model: 80 frames (5s): 11 GB of VRAM")
             gr.Markdown("It is not recommmended to generate a video longer than 8s (128 frames) even if there is still some VRAM left as some artifacts may appear")
-        gr.Markdown("Please note that if your turn on compilation, the first generation step of the first video generation will be slow due to the compilation. Therefore all your tests should be done with compilation turned off.")
+        gr.Markdown("Please note that if your turn on compilation, the first denoising step of the first video generation will be slow due to the compilation. Therefore all your tests should be done with compilation turned off.")
 
 
         # css = """<STYLE>
@@ -1135,6 +1339,16 @@ def create_demo():
                     label="VAE Tiling - reduce the high VRAM requirements for VAE decoding and VAE encoding (if enabled it will be slower)"
                  )
 
+                boost_choice = gr.Dropdown(
+                    choices=[
+                        # ("Auto (ON if Video longer than 5s)", 0),
+                        ("ON", 1), 
+                        ("OFF", 2), 
+                    ],
+                    value=boost,
+                    label="Boost: Give a 10% speed speedup without losing quality at the cost of a litle VRAM (up to 1GB for max frames and resolution)"
+                )
+
                 profile_choice = gr.Dropdown(
                     choices=[
                 ("HighRAM_HighVRAM, profile 1: at least 48 GB of RAM and 24 GB of VRAM, the fastest for short videos a RTX 3090 / RTX 4090", 1),
@@ -1166,16 +1380,12 @@ def create_demo():
                 video_to_continue = gr.Video(label= "Video to continue", visible= use_image2video and False) #######
                 if args.multiple_images:  
                     image_to_continue = gr.Gallery(
-                            label="Images as a starting point for new videos", type ="numpy", #file_types= "image", 
+                            label="Images as a starting point for new videos", type ="pil", #file_types= "image", 
                             columns=[3], rows=[1], object_fit="contain", height="auto", selected_index=0, interactive= True, visible=use_image2video)
                 else:
-                    image_to_continue = gr.Image(label= "Image as a starting point for a new video", visible=use_image2video)
+                    image_to_continue = gr.Image(label= "Image as a starting point for a new video", type ="pil", visible=use_image2video)
 
-                if use_image2video:
-                    prompt = gr.Textbox(label="Prompts (multiple prompts separated by carriage returns will generate multiple videos)", value="Several giant wooly mammoths approach treading through a snowy meadow, their long wooly fur lightly blows in the wind as they walk, snow covered trees and dramatic snow capped mountains in the distance, mid afternoon light with wispy clouds and a sun high in the distance creates a warm glow, the low camera view is stunning capturing the large furry mammal with beautiful photography, depth of field.", lines=3)
-                else:
-                    prompt = gr.Textbox(label="Prompts (multiple prompts separated by carriage returns will generate multiple videos)", value="A large orange octopus is seen resting on the bottom of the ocean floor, blending in with the sandy and rocky terrain. Its tentacles are spread out around its body, and its eyes are closed. The octopus is unaware of a king crab that is crawling towards it from behind a rock, its claws raised and ready to attack. The crab is brown and spiny, with long legs and antennae. The scene is captured from a wide angle, showing the vastness and depth of the ocean. The water is clear and blue, with rays of sunlight filtering through. The shot is sharp and crisp, with a high dynamic range. The octopus and the crab are in focus, while the background is slightly blurred, creating a depth of field effect.", lines=3)
-
+                prompt = gr.Textbox(label="Prompts (multiple prompts separated by carriage returns will generate multiple videos, lines that starts with # are ignored)", value=default_prompt, lines=3)
                     
                 with gr.Row():
                     if use_image2video:
@@ -1228,9 +1438,22 @@ def create_demo():
                         # with gr.Column():
                         with gr.Row(height=17):
                             apply_lset_btn = gr.Button("Apply Lora Preset", size="sm", min_width= 1)
+                            refresh_lora_btn = gr.Button("Refresh Lora List", size="sm", min_width= 1)
+                            # save_lset_prompt_cbox = gr.Checkbox(label="Save Prompt Comments in Preset", value=False, visible= False)
+                            save_lset_prompt_drop= gr.Dropdown(
+                                choices=[
+                                    ("Save Prompt Comments Only", 0),
+                                    ("Save Full Prompt", 1)
+                                ],  show_label= False, container=False, visible= False
+                            ) 
+
+
                         with gr.Row(height=17):
+                            confirm_save_lset_btn = gr.Button("Go Ahead Save it !", size="sm", min_width= 1, visible=False) 
+                            confirm_delete_lset_btn = gr.Button("Go Ahead Delete it !", size="sm", min_width= 1, visible=False) 
                             save_lset_btn = gr.Button("Save", size="sm", min_width= 1)
                             delete_lset_btn = gr.Button("Delete", size="sm", min_width= 1)
+                            cancel_lset_btn = gr.Button("Don't do it !", size="sm", min_width= 1 , visible=False)  
 
 
                 loras_choices = gr.Dropdown(
@@ -1242,31 +1465,36 @@ def create_demo():
                     visible= len(loras)>0,
                     label="Activated Loras"
                 )
-                loras_mult_choices = gr.Textbox(label="Loras Multipliers (1.0 by default) separated by space characters or carriage returns", value=default_loras_multis_str, visible= len(loras)>0 )
+                loras_mult_choices = gr.Textbox(label="Loras Multipliers (1.0 by default) separated by space characters or carriage returns, line that starts with # are ignored", value=default_loras_multis_str, visible= len(loras)>0 )
 
                 show_advanced = gr.Checkbox(label="Show Advanced Options", value=False)
                 with gr.Row(visible=False) as advanced_row:
                     with gr.Column():
                         seed = gr.Slider(-1, 999999999, value=-1, step=1, label="Seed (-1 for random)") 
-                        repeat_generation = gr.Slider(1, 25.0, value=1.0, step=1, label="Number of Generated Video per prompt") 
+                        repeat_generation = gr.Slider(1, 25.0, value=1.0, step=1, label="Default Number of Generated Videos per Prompt") 
                         with gr.Row():
                             negative_prompt = gr.Textbox(label="Negative Prompt", value="")
                         with gr.Row():
                             guidance_scale = gr.Slider(1.0, 20.0, value=5.0, step=0.5, label="Guidance Scale", visible=True)
                             embedded_guidance_scale = gr.Slider(1.0, 20.0, value=6.0, step=0.5, label="Embedded Guidance Scale", visible=False)
                             flow_shift = gr.Slider(0.0, 25.0, value= default_flow_shift, step=0.1, label="Shift Scale") 
-                        tea_cache_setting = gr.Dropdown(
-                            choices=[
-                                ("Tea Cache Disabled", 0),
-                                ("0.03 (around x1.6 speed up)", 0.03), 
-                                ("0.05 (around x2 speed up)", 0.05), 
-                                ("0.10 (around x3 speed up)", 0.1), 
-                            ],
-                            value=default_tea_cache,
-                            visible=True,
-                            label="Tea Cache Threshold to Skip Steps (the higher, the more steps are skipped but the lower the quality of the video (Tea Cache Consumes VRAM)"
-                        )
-                        tea_cache_start_step_perc = gr.Slider(2, 100, value=20, step=1, label="Tea Cache starting moment in percentage of generation (the later, the higher the quality but also the lower the speed gain)") 
+                        with gr.Row():
+                            gr.Markdown("Tea Cache accelerates by skipping intelligently some steps, the more steps are skipped the lower the quality of the video (Tea Cache consumes also VRAM)")
+                        with gr.Row():
+                            tea_cache_setting = gr.Dropdown(
+                                choices=[
+                                    ("Tea Cache Disabled", 0),
+                                    ("around x1.5 speed up", 1.5), 
+                                    ("around x1.75 speed up", 1.75), 
+                                    ("around x2 speed up", 2.0), 
+                                    ("around x2.25 speed up", 2.25), 
+                                    ("around x2.5 speed up", 2.5), 
+                                ],
+                                value=default_tea_cache,
+                                visible=True,
+                                label="Tea Cache Global Acceleration"
+                            )
+                            tea_cache_start_step_perc = gr.Slider(0, 100, value=0, step=1, label="Tea Cache starting moment in % of generation") 
 
                         RIFLEx_setting = gr.Dropdown(
                             choices=[
@@ -1278,6 +1506,34 @@ def create_demo():
                             label="RIFLEx positional embedding to generate long video"
                         )
 
+
+                        with gr.Row():
+                            gr.Markdown("Experimental: Skip Layer guidance,should improve video quality")
+                        with gr.Row():
+                            slg_switch = gr.Dropdown(
+                                choices=[
+                                    ("OFF", 0),
+                                    ("ON", 1), 
+                                ],
+                                value= 0,
+                                visible=True,
+                                scale = 1,
+                                label="Skip Layer guidance"
+                            )
+                            slg_layers = gr.Dropdown(
+                                choices=[
+                                    (str(i), i ) for i in range(40)
+                                ],
+                                value= [9],
+                                multiselect= True,
+                                label="Skip Layers",
+                                scale= 3
+                            )
+                        with gr.Row():
+                            slg_start_perc = gr.Slider(0, 100, value=10, step=1, label="Denoising Steps % start") 
+                            slg_end_perc = gr.Slider(0, 100, value=90, step=1, label="Denoising Steps % end") 
+
+
                 show_advanced.change(fn=lambda x: gr.Row(visible=x), inputs=[show_advanced], outputs=[advanced_row])
             
             with gr.Column():
@@ -1286,18 +1542,25 @@ def create_demo():
                         label="Generated videos", show_label=False, elem_id="gallery"
                     , columns=[3], rows=[1], object_fit="contain", height="auto", selected_index=0, interactive= False)
                 generate_btn = gr.Button("Generate")
+                onemore_btn = gr.Button("One More Please !", visible= False)
                 abort_btn = gr.Button("Abort")
 
-        save_lset_btn.click(save_lset, inputs=[lset_name, loras_choices, loras_mult_choices], outputs=[lset_name])
-        delete_lset_btn.click(delete_lset, inputs=[lset_name], outputs=[lset_name])
-        apply_lset_btn.click(apply_lset, inputs=[lset_name,loras_choices, loras_mult_choices], outputs=[loras_choices, loras_mult_choices])
+        save_lset_btn.click(validate_save_lset, inputs=[lset_name], outputs=[apply_lset_btn, refresh_lora_btn, delete_lset_btn, save_lset_btn,confirm_save_lset_btn, cancel_lset_btn, save_lset_prompt_drop])
+        confirm_save_lset_btn.click(save_lset, inputs=[lset_name, loras_choices, loras_mult_choices, prompt, save_lset_prompt_drop], outputs=[lset_name, apply_lset_btn,refresh_lora_btn, delete_lset_btn, save_lset_btn, confirm_save_lset_btn, cancel_lset_btn, save_lset_prompt_drop])
+        delete_lset_btn.click(validate_delete_lset, inputs=[lset_name], outputs=[apply_lset_btn, refresh_lora_btn, delete_lset_btn, save_lset_btn,confirm_delete_lset_btn, cancel_lset_btn ])
+        confirm_delete_lset_btn.click(delete_lset, inputs=[lset_name], outputs=[lset_name, apply_lset_btn, refresh_lora_btn, delete_lset_btn, save_lset_btn,confirm_delete_lset_btn, cancel_lset_btn ])
+        cancel_lset_btn.click(cancel_lset, inputs=[], outputs=[apply_lset_btn, refresh_lora_btn, delete_lset_btn, save_lset_btn, confirm_delete_lset_btn,confirm_save_lset_btn, cancel_lset_btn,save_lset_prompt_drop ])
+
+        apply_lset_btn.click(apply_lset, inputs=[lset_name,loras_choices, loras_mult_choices, prompt], outputs=[loras_choices, loras_mult_choices, prompt])
+
+        refresh_lora_btn.click(refresh_lora_list, inputs=[lset_name,loras_choices], outputs=[lset_name, loras_choices])
 
         gen_status.change(refresh_gallery, inputs = [state], outputs = output )
 
         abort_btn.click(abort_generation,state,abort_btn )
         output.select(select_video, state, None )
-
-        generate_btn.click(
+        onemore_btn.click(fn=one_more_video,inputs=[state], outputs= [state])
+        generate_btn.click(fn=prepare_generate_video,inputs=[], outputs= [generate_btn, onemore_btn]).then(
             fn=generate_video,
             inputs=[
                 prompt,
@@ -1318,14 +1581,18 @@ def create_demo():
                 video_to_continue,
                 max_frames,
                 RIFLEx_setting,
-                state
+                slg_switch, 
+                slg_layers,
+                slg_start_perc,
+                slg_end_perc,
+                state,
             ],
             outputs= [gen_status] #,state 
 
         ).then( 
             finalize_gallery,
             [state], 
-            [output , abort_btn]
+            [output , abort_btn, generate_btn, onemore_btn]
         )
 
         apply_btn.click(
@@ -1340,12 +1607,13 @@ def create_demo():
                     profile_choice,
                     vae_config_choice,
                     default_ui_choice,
+                    boost_choice,
                 ],
                 outputs= msg
             ).then( 
             update_defaults, 
             [state, num_inference_steps,  flow_shift], 
-            [num_inference_steps,  flow_shift, header]
+            [num_inference_steps,  flow_shift, header, lset_name , loras_choices ]
                 )
 
     return demo

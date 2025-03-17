@@ -252,10 +252,10 @@ if args.i2v:
     use_image2video = True
 
 lora_dir =args.lora_dir
-if use_image2video and len(lora_dir)==0:
-    root_lora_dir =args.lora_dir_i2v
-if len(lora_dir) ==0:
-    root_lora_dir = "loras_i2v" if use_image2video else "loras"
+# if use_image2video and len(lora_dir)==0:
+#     root_lora_dir =args.lora_dir_i2v
+# if len(lora_dir) ==0:
+#     root_lora_dir = "loras_i2v" if use_image2video else "loras"
 lora_dir = get_lora_dir(root_lora_dir)
 lora_preselected_preset = args.lora_preset
 default_tea_cache = 0

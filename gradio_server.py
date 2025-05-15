@@ -251,13 +251,15 @@ if args.t2v:
 if args.i2v:
     use_image2video = True
 
-lora_dir =args.lora_dir
-# if use_image2video and len(lora_dir)==0:
-#     root_lora_dir =args.lora_dir_i2v
-# if len(lora_dir) ==0:
-#     root_lora_dir = "loras_i2v" if use_image2video else "loras"
-lora_dir = get_lora_dir(root_lora_dir)
+lora_dir = args.lora_dir
+
+# Set root_lora_dir based on whether we're in image-to-video mode or not
+root_lora_dir = args.lora_dir_i2v if use_image2video and len(args.lora_dir) == 0 else args.lora_dir
+if len(root_lora_dir) == 0:
+    root_lora_dir = "loras_i2v" if use_image2video else "loras"
+
 lora_preselected_preset = args.lora_preset
+lora_dir = get_lora_dir(root_lora_dir)
 default_tea_cache = 0
 # if args.fast : #or args.fastest
 #     transformer_filename_t2v = transformer_choices_t2v[2]
